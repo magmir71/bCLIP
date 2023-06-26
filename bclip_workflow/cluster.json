@@ -1,0 +1,136 @@
+{
+"__default__":
+{
+"queue":"6hours",
+"time": "06:00:00",
+"threads":"1",
+"mem":"40G",
+"out": "/scicore/home/zavolan/GROUP/StefanieCLIP/aleksei/temp_dir/slurm/{rule}.{wildcards}-%j-%N.out"
+},
+"remove_duplicated_sequences":
+{
+"queue":"6hours",
+"time": "05:59:00",
+"threads":"1",
+"mem":"70G"
+},
+"extract_umi":
+{
+"queue":"6hours",
+"time": "05:59:00",
+"threads":"1",
+"mem":"30G"
+},
+"demultiplex":
+{
+"queue":"6hours",
+"time": "04:00:00",
+"threads":"10",
+"mem":"30G"
+},
+"create_symb_links_for_demultiplexed_reads":
+{
+"queue":"6hours",
+"time": "00:10:00",
+"threads":"1",
+"mem":"2G"
+},
+"remove_polya":
+{
+"queue":"6hours",
+"time": "02:00:00",
+"threads":"10",
+"mem":"30G"
+},
+"estimate_max_read_length":
+{
+"queue":"6hours",
+"time": "00:10:00",
+"threads":"1",
+"mem":"2G"
+},
+"create_STAR_indices":
+{
+"queue":"1day",
+"time": "23:59:00",
+"threads":"12",
+"mem":"70G"
+},
+"map_genome_star":
+{
+"queue":"6hours",
+"time": "05:59:00",
+"threads":"12",
+"mem":"40G"
+},
+"pigz_unmapped_reads":
+{
+"queue":"6hours",
+"time": "05:59:00",
+"threads":"6",
+"mem":"5G"
+},
+"fastqc_unmapped":
+{
+"queue":"6hours",
+"time": "05:59:00",
+"threads":"1",
+"mem":"5G"
+},
+"bamTofastq":
+{
+"queue":"6hours",
+"time": "05:59:00",
+"threads":"4",
+"mem":"30G"
+},
+"pigz_mapped_fastq":
+{
+"queue":"6hours",
+"time": "05:59:00",
+"threads":"6",
+"mem":"5G"
+},
+"fastqc_mapped":
+{
+"queue":"6hours",
+"time": "05:59:00",
+"threads":"1",
+"mem":"5G"
+},    
+"GN_map_STAR":
+{
+"queue":"6hours",
+"time": "01:00:00",
+"threads":"12",
+"mem":"50G"
+},
+"GN_index_mappings":
+{
+"queue":"6hours",
+"time": "02:00:00",
+"threads":"8",
+"mem":"30G"
+},
+"GN_umi_collapse":
+{
+"queue":"6hours",
+"time": "04:00:00",
+"threads":"1",
+"mem":"30G"
+},
+"GN_index_dedup":
+{
+"queue":"6hours",
+"time": "02:00:00",
+"threads":"8",
+"mem":"30G"
+},
+"peak_calling":
+{
+"queue":"1day",
+"time": "23:00:00",
+"threads":"15",
+"mem":"60G"
+}
+}

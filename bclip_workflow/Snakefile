@@ -1,0 +1,933 @@
+import os
+import pandas as pd
+import shutil
+import yaml
+from shlex import quote
+from typing import Tuple
+from snakemake.utils import validate
+
+## Preparations
+
+configfile: "config.yaml"
+localrules:  finish, create_symb_links_for_demultiplexed_reads, aggregate_max_read_length_estimates, create_STAR_indices, create_symb_links_for_STAR_indices
+wildcard_constraints: lane = config["lane_constraints"]
+
+# Get sample table
+samples = pd.read_csv(
+    config["samples_file"],
+    header=0,
+    index_col=0,
+    comment='#',
+    engine='python',
+    sep="\t")
+
+# functions
+def get_demultiplexed_sample_paths(wildcards):
+    '''
+        get generated paths of demultiplexed samples from a checkpoint
+    '''
+    ck_output = checkpoints.Demultiplex.get(lane = samples.loc[wildcards.sample, 'lane_name']).output[0]
+    return os.path.join(ck_output, "{sample}.demultiplexed.fastq.gz")
+
+rule finish:
+    input:
+        STAR_index_symb_link = expand(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "STAR_index"),
+        sample = list(samples.index.values)),
+        bam=expand(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.bam",
+        ), sample = list(samples.index.values)),
+        fastq_unmapped=expand(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Unmapped.out.fastq.gz",
+        ), sample = list(samples.index.values)),
+        log_final_file=expand(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Log.final.out",
+        ), sample = list(samples.index.values)),
+        fastqc_unmapped=expand(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "fastqc_unmapped"),
+        sample = list(samples.index.values)),
+        fastqc_mapped=expand(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "fastqc_mapped"),
+        sample = list(samples.index.values)),
+        bam_dedup_sorted = expand(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.dedup.sorted.indexed.bam"),
+        sample = list(samples.index.values)),
+
+current_rule = "remove_duplicated_sequences"
+        
+rule remove_duplicated_sequences:
+    '''
+        Remove duplicated sequences from reads (UMI+sample barcode+insert)
+        To get a comparable result with 
+    '''
+    input:
+        reads = lambda wildcards: samples.loc[samples["lane_name"] == wildcards.lane, "lane_file"].iloc[0]
+    output:
+        reads = os.path.join(
+            config["output_dir"],
+            "deduplicated",
+            "{lane}.deduplicated.fastq.gz")
+
+    params:
+        output_dir = os.path.join(config["output_dir"],"deduplicated"),
+        kmer = lambda wildcards: samples.loc[samples["lane_name"] == wildcards.lane, "kmer"].iloc[0],
+        deduplication_summary = lambda wildcards: os.path.join(config["output_dir"],"deduplicated",wildcards.lane+".deduplication_summary.txt"),
+    singularity:
+        "docker://pegi3s/seqkit"
+    threads: 1
+    log:
+        os.path.join(
+            config["local_log"],
+            "remove_duplicated_sequences__{lane}.log")
+    shell:
+        """(mkdir -p {params.output_dir}; \
+        if [[ "{params.kmer}" =~ [^Xx[:space:]] ]]; then \
+        seqkit rmdup -s -P {input.reads} -o {output.reads} -D {params.deduplication_summary}; else \
+        ln -f -s {input.reads} {output.reads}; fi) &> {log}"""               
+
+current_rule = "extract_umi"
+        
+rule extract_umi:
+    '''
+        Extract UMIs and add them in the sequence header if the fastq file has associated kmers 
+        otherwise create a dummy file
+    '''
+    input:
+        reads = os.path.join(
+            config["output_dir"],
+            "deduplicated",
+            "{lane}.deduplicated.fastq.gz")
+    output:
+        reads = os.path.join(
+            config["output_dir"],
+            "extract_umis",
+            "{lane}.extract_umis.fastq.gz")
+
+    params:
+        output_dir = os.path.join(config["output_dir"],"extract_umis"),
+        log = os.path.join(
+            config["output_dir"],
+            "extract_umis",
+            "{lane}.extractumis.log"),
+        kmer = lambda wildcards:
+            samples.loc[samples["lane_name"] == wildcards.lane, "kmer"].iloc[0]
+
+    singularity:
+        "docker://quay.io/biocontainers/umi_tools:1.1.2--py38h4a8c8d9_0"
+
+    threads: 1
+
+    log:
+        os.path.join(
+            config["local_log"],
+            "extract_umis__{lane}.log")
+
+    shell:
+        """(mkdir -p {params.output_dir}; \
+        if [[ "{params.kmer}" =~ [^Xx[:space:]] ]]; then \
+        umi_tools extract \
+        --stdin={input.reads} \
+        --bc-pattern={params.kmer} \
+        --log={params.log} \
+        --stdout {output.reads}; else \
+        ln -f -s {input.reads} {output.reads}; fi) &> {log}"""
+        
+checkpoint Demultiplex:
+    '''
+        Demultiplex samples 
+    '''
+    input:
+        reads = os.path.join(
+            config["output_dir"],
+            "extract_umis",
+            "{lane}.extract_umis.fastq.gz"),
+    output:
+        outdir = directory(os.path.join(
+            config["output_dir"],
+            "demultiplex",
+            "{lane}")),
+    params:
+        barcodes = lambda wildcards: samples.loc[samples["lane_name"] == wildcards.lane, "barcode_file"].iloc[0],
+        first_sample = lambda wildcards: samples.loc[samples["lane_name"] == wildcards.lane].index[0],
+        error_rate = config["demux_error_rate"],
+        kmer = lambda wildcards: samples.loc[samples["lane_name"] == wildcards.lane, "kmer"].iloc[0],
+        
+    singularity:
+        "docker://quay.io/biocontainers/cutadapt:3.4--py37h73a75cf_1"
+
+    threads: 10
+
+    log:
+        os.path.join(config["local_log"],"demultiplex__{lane}.log")
+
+    shell:
+        """(mkdir -p {output.outdir}; \
+        if [[ "{params.kmer}" =~ [^Xx[:space:]] ]]; then \
+        cutadapt \
+        -e {params.error_rate} \
+        --no-indels \
+        -g file:{params.barcodes} \
+        -o {output.outdir}/{{name}}.demultiplexed.fastq.gz \
+        -j {threads} \
+        {input.reads}; else \
+        ln -f -s {input.reads} {output.outdir}/{params.first_sample}.demultiplexed.fastq.gz; fi) &> {log}"""
+
+        
+current_rule = "create_symb_links_for_demultiplexed_reads"
+
+rule create_symb_links_for_demultiplexed_reads:
+    '''
+        create symbolyc links for demultiplexed reads
+    '''
+    input:
+        reads = get_demultiplexed_sample_paths,
+    output:
+        moved_reads = os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "fastq",
+            "{sample}.fastq.gz"),
+    params:
+        outdir = os.path.join(config["output_dir"],"samples","{sample}","fastq"),
+    threads: 1
+    log:
+        os.path.join(config["local_log"],"create_symb_links_for_demultiplexed_reads__{sample}.log")
+
+    shell:
+        """(mkdir -p {params.outdir}; ln -f -s {input.reads} {output.moved_reads}) &> {log}"""
+
+# rule remove_polya:
+#     '''
+#         Remove remaining poly(A) stretches from 3' end of reads
+#     '''
+#     input:
+#         valid_sample = lambda wildcards: expand(os.path.join(
+#             config["output_dir"],
+#             "demultiplex",
+#             "{lane}",
+#             "{{sample}}.demultiplexed.fastq.gz"),
+#             lane = samples.loc[wildcards.sample,"lane_name"])
+
+#     output:
+#         no_polya = os.path.join(
+#             config["output_dir"],
+#             "{sample}",
+#             "{sample}.no_polya.fastq.gz")
+
+#     params:
+#         adapt = config['a_tail_length'], 
+#         error_rate = config['polyA_error_rate'],
+#         min_len=config['min_length'],
+#         min_overlap = config['polyA_min_overlap']
+
+#     singularity:
+#         "docker://quay.io/biocontainers/cutadapt:3.4--py37h73a75cf_1"
+    
+#     threads: 10
+
+#     log:
+#         os.path.join(
+#             config["local_log"],
+#             "remove_polya__{sample}.log")
+
+#     shell:
+#         "(cutadapt \
+#         --adapter {params.adapt} \
+#         --minimum-length {params.min_len} \
+#         --overlap {params.min_overlap} \
+#         -j {threads} \
+#         -e {params.error_rate} \
+#         -o {output.no_polya} \
+#         {input.valid_sample}) \
+#         &> {log}"        
+        
+current_rule = "estimate_max_read_length"
+
+rule estimate_max_read_length:
+    '''
+         estimate max read length in a sample
+         To use as input for STAR 
+    '''
+    input:
+        reads = os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "fastq",
+            "{sample}.fastq.gz"),
+    output:
+        max_read_length = os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "read_length",
+            "{sample}.max_read_length.txt"),
+    params:
+        outdir = directory(os.path.join(config["output_dir"],"samples","{sample}","read_length")),
+
+    threads: 1
+    singularity:
+        "docker://pegi3s/seqkit"
+    log:
+        os.path.join(config["local_log"],"estimate_max_read_length__{sample}.log")
+
+    shell:
+        """(set +o pipefail; mkdir -p {params.outdir}; seqkit sample \
+        -p 0.3 {input.reads} | seqkit head -n 1000 | seqkit seq -s | \
+        awk '{{print length}}' | \
+        awk 'BEGIN{{a=0}}{{if ($1>0+a) a=$1}} END{{print a}}' > {output.max_read_length}) &> {log}"""
+
+current_rule = "aggregate_max_read_length_estimates"
+
+rule aggregate_max_read_length_estimates:
+    '''
+         aggregate_max read length estimates over all samples
+    '''
+    input:
+        max_read_length_estimates = expand(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "read_length",
+            "{sample}.max_read_length.txt"),
+            sample = list(samples.index)),
+        script=os.path.join(workflow.basedir, "scripts", "aggregate_max_read_length_estimates.py"),
+    output:
+        max_read_lengths_aggr = os.path.join(
+            config["output_dir"],
+            "misc",
+            "max_read_lengths.tsv"),
+    params:
+        outdir = os.path.join(config["output_dir"],"misc"),
+
+    threads: 1
+    log:
+        os.path.join(config["local_log"],"aggregate_max_read_length_estimates.log")
+    shell:
+        """(mkdir -p {params.outdir}; \
+        python {input.script} \
+        --input_samples """+config["samples_file"]+""" \
+        --results_dir """+config["output_dir"]+""" \
+        --out_file {output.max_read_lengths_aggr}) &> {log}"""        
+
+current_rule = "create_STAR_indices"
+
+rule create_STAR_indices:
+    """
+        Create indices for STAR alignments
+        The rule submits slurm jobs itself and waits until all of them are executed  
+    """
+    input:
+        max_read_lengths_aggr = os.path.join(
+            config["output_dir"],
+            "misc",
+            "max_read_lengths.tsv"),
+        script=os.path.join(workflow.basedir, "scripts", "create_STAR_indices.py"),
+    output:
+        success_flag=os.path.join(
+            config["output_dir"],
+            "STAR_index","success.txt"),
+    params:
+        STAR_indices_dir=os.path.join(
+            config["output_dir"],
+            "STAR_index"),
+        threads_number = 12,
+        docker_image = "docker://quay.io/biocontainers/star:2.7.8a--h9ee0642_1",
+        docker_image_target_path=os.path.join(workflow.basedir, ".snakemake", "singularity","star.simg"),
+    threads: 1
+    log:
+        os.path.join(config["local_log"],"create_STAR_indices.log")
+    shell:
+        """(python {input.script} \
+        --max_read_lengths_aggr {input.max_read_lengths_aggr} \
+        --cluster_log_dir """+config["cluster_log"]+""" \
+        --threads_number {params.threads_number} \
+        --docker_image {params.docker_image} \
+        --docker_image_target_path {params.docker_image_target_path} \
+        --results_dir {params.STAR_indices_dir}) \
+        &> {log}"""
+
+current_rule = "create_symb_links_for_STAR_indices"
+
+rule create_symb_links_for_STAR_indices:
+    '''
+        create symbolyc links for STAR indices
+        so that then one can easily loop over samples
+    '''
+    input:
+        max_read_length_estimate = os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "read_length",
+            "{sample}.max_read_length.txt"),
+        success_flag=os.path.join(
+            config["output_dir"],
+            "STAR_index","success.txt"),
+        script=os.path.join(workflow.basedir, "scripts", "create_symb_link_to_STAR_index.py"),
+    output:
+        STAR_index_symb_link = directory(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "STAR_index")),
+    params:
+        sample_id = "{sample}",
+        STAR_indices_dir=os.path.join(
+            config["output_dir"],
+            "STAR_index"),        
+    threads: 1
+    log:
+        os.path.join(config["local_log"],"create_symb_links_for_demultiplexed_reads__{sample}.log")
+    shell:
+        """(python {input.script} \
+        --input_samples """+config["samples_file"]+""" \
+        --sample_id {params.sample_id} \
+        --max_read_length_estimate {input.max_read_length_estimate} \
+        --STAR_indices_dir {params.STAR_indices_dir} \
+        --link_to_create {output.STAR_index_symb_link}) &> {log}"""
+        
+current_rule = "map_genome_star"
+
+rule map_genome_star:
+    """
+        Map to genome using STAR
+    """
+    input:
+        STAR_index_symb_link = os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "STAR_index"),
+        reads=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "fastq",
+            "{sample}.fastq.gz"),
+    output:
+        bam=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.bam",
+        ),
+        fastq_unmapped=temp(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Unmapped.out.mate1",
+        )),
+        log_final_file=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Log.final.out",
+        ),
+    params:
+        outFileNamePrefix=lambda wildcards, output: output.bam.replace(
+            "Aligned.sortedByCoord.out.bam", ""
+        ),
+    singularity:
+        "docker://quay.io/biocontainers/star:2.7.8a--h9ee0642_1"
+    threads: 12
+    log:
+        os.path.join(config["local_log"],"map_genome_star__{sample}.log")
+    shell:
+        """(STAR \
+        --runMode alignReads \
+        --alignEndsType Local \
+        --runThreadN {threads} \
+        --genomeDir {input.STAR_index_symb_link} \
+        --readFilesIn {input.reads} \
+        --readFilesCommand zcat \
+        --outFileNamePrefix {params.outFileNamePrefix} \
+        --genomeLoad NoSharedMemory \
+        --outSAMtype BAM SortedByCoordinate \
+        --outFilterType BySJout \
+        --seedSearchStartLmax 10 \
+        --seedSearchStartLmaxOverLread 0.5 \
+        --outFilterMatchNmin 16 \
+        --outSJfilterOverhangMin 7 7 7 7 \
+        --alignSJDBoverhangMin 7 \
+        --alignSJoverhangMin 7 \
+        --outFilterMismatchNmax 999 \
+        --outFilterMismatchNoverReadLmax 0.05 \
+        --outFilterMatchNminOverLread 0.3 \
+        --outReadsUnmapped Fastx \
+        --twopassMode Basic \
+        --outBAMsortingThreadN {threads} \
+        --outFilterMultimapNmax 500000000) \
+        &> {log}"""
+
+current_rule = "samtools_index_mapped"        
+        
+rule samtools_index_mapped:
+    '''
+        index bam files
+    '''
+    input:
+        bam=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.bam",
+        ),
+    output:
+        bai = os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.bam.bai"),
+    singularity:
+        "docker://quay.io/biocontainers/samtools:1.9--h10a08f8_12"
+    threads: 8
+    log:
+        os.path.join(config["local_log"],"samtools_index_mapped__{sample}.log")
+    shell:
+        """(samtools index \
+        {input.bam}; ) &> {log}"""
+        
+current_rule = "pigz_unmapped_reads"
+
+rule pigz_unmapped_reads:
+    """
+        Compress fastq with unmapped reads with pigz.
+    """
+    input:
+        fastq_unmapped=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Unmapped.out.mate1",
+        ),
+    output:
+        gz_file=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Unmapped.out.fastq.gz"),
+    threads: 6
+    singularity:
+        "docker://nsheff/pigz:latest"
+    log:
+        os.path.join(config["local_log"],"pigz_unmapped_reads__{sample}.log")
+    shell:
+        """pigz \
+        --force \
+        --stdout \
+        --processes {threads} \
+        {input.fastq_unmapped} > {output.gz_file} \
+        2> {log}"""
+
+current_rule = "fastqc_unmapped"
+
+rule fastqc_unmapped:
+    """
+        A quality control tool for high throughput sequence data
+    """
+    input:
+        reads=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Unmapped.out.fastq.gz"),
+    output:
+        outdir=directory(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "fastqc_unmapped")),
+    threads: 1
+    singularity:
+        "docker://quay.io/biocontainers/fastqc:0.11.9--hdfd78af_1"
+    log:
+        os.path.join(config["local_log"],"fastqc_unmapped__{sample}.log")
+    shell:
+        """(mkdir -p {output.outdir}; \
+        fastqc --outdir {output.outdir} \
+        --threads {threads} \
+        {input.reads}) \
+        &> {log}"""
+        
+current_rule = "bamTofastq"
+
+rule bamTofastq:
+    """
+        Get a fastq file from a bam file to further process it with fastqc
+    """
+    input:
+        bam=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.bam",
+        ),
+    output:
+        fastq=temp(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.fastq",
+        )),
+    threads: 4
+    singularity:
+        "docker://quay.io/biocontainers/samtools:1.9--h10a08f8_12"
+    log:
+        os.path.join(config["local_log"],"bamTofastq__{sample}.log")
+    shell:
+        """samtools fastq {input.bam} > {output.fastq} 2> {log}"""        
+
+current_rule = "pigz_mapped_fastq"
+
+rule pigz_mapped_fastq:
+    """
+        Compress fastq with unmapped reads with pigz.
+    """
+    input:
+        fastq_mapped=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.fastq",
+        ),
+    output:
+        gz_file=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.fastq.gz"),
+    threads: 6
+    singularity:
+        "docker://nsheff/pigz:latest"
+    log:
+        os.path.join(config["local_log"],"pigz_mapped_reads__{sample}.log")
+    shell:
+        """pigz \
+        --force \
+        --stdout \
+        --processes {threads} \
+        {input.fastq_mapped} > {output.gz_file} \
+        2> {log}"""
+        
+current_rule = "fastqc_mapped"
+
+rule fastqc_mapped:
+    """
+        A quality control tool for high throughput sequence data
+    """
+    input:
+        reads=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.fastq.gz"),
+    output:
+        outdir=directory(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "fastqc_mapped")),
+    threads: 1
+    singularity:
+        "docker://quay.io/biocontainers/fastqc:0.11.9--hdfd78af_1"
+    log:
+        os.path.join(config["local_log"],"fastqc_mapped__{sample}.log")
+    shell:
+        """(mkdir -p {output.outdir}; \
+        fastqc --outdir {output.outdir} \
+        --threads {threads} \
+        {input.reads}) \
+        &> {log}"""
+
+current_rule = "GN_umi_collapse"
+        
+rule GN_umi_collapse:
+    '''
+        Collapse PCR duplicates
+    '''
+    input:
+        bam=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.bam",
+        ),
+        bai=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.bam.bai",
+        ),
+    output:
+        bam = temp(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.no_dupl.bam")),
+    params:
+        kmer = lambda wildcards: samples.loc[wildcards.sample]["kmer"],
+    singularity:
+        "docker://quay.io/biocontainers/umi_tools:1.1.2--py38h4a8c8d9_0"
+    log:
+        os.path.join(config["local_log"],"GN_umi_collapse__{sample}.log")
+    shell:
+        """(if [[ "{params.kmer}" =~ [^Xx[:space:]] ]]; then \
+        umi_tools \
+        dedup \
+        -I {input.bam} \
+        -S {output.bam}; else \
+        ln -f -s {input.bam} {output.bam}) &> {log}"""
+        
+current_rule = "GN_index_dedup"
+        
+rule GN_index_dedup:
+    '''
+        Sort and index deduplicated bam files
+    '''
+    input:
+        bam = os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.Aligned.sortedByCoord.out.no_dupl.bam")
+    output:
+        bam = os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.dedup.sorted.indexed.bam"),
+        bai = os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.dedup.sorted.indexed.bam.bai"),
+        prefix_temp  = temp(
+            directory(
+                os.path.join(
+                    config["output_dir"],
+                    "samples",
+                    "{sample}",
+                    "map_genome",
+                    "{sample}.sort_dedup_temp"
+                    ),
+                )
+            )
+    singularity:
+        "docker://quay.io/biocontainers/samtools:1.9--h10a08f8_12"
+    threads: 8
+    log:
+        os.path.join(config["local_log"],"GN_index_dedup__{sample}.log")
+    shell:
+        """(mkdir -p {output.prefix_temp}; \
+        samtools sort \
+        -o {output.bam} \
+        -T {output.prefix_temp} \
+        -@ {threads}  \
+        {input.bam}; \
+        samtools index \
+        {output.bam}; ) &> {log}"""
+
+###
+### rules about quantification of read counts 
+###
+
+# current_rule = "samtools_index_genome"
+
+# rule samtools_index_genome:
+#     """
+#         Create .fai file from the input genome file.
+#     """
+#     input:
+#         genome=lambda wildcards: samples.loc[samples["organism"] == wildcards.organism]["genome_file"].iloc[0],
+#     output:
+#         genome_fai=os.path.join(
+#                 config["output_dir"], "genome_indices", "{organism}", "genome.fai"
+#             ),
+#     params:
+#         output_dir=lambda wildcards, output: os.path.dirname(output.genome_fai),
+#         intermediate_file=lambda wildcards: samples.loc[samples["organism"] == wildcards.organism]["genome_file"].iloc[0]+'.fai',
+#     singularity:
+#         "docker://quay.io/biocontainers/samtools:1.9--h10a08f8_12"
+#     log:
+#         os.path.join(config["local_log"],"samtools_index_genome__{organism}.log"),
+#     shell:
+#         """(mkdir -p {params.output_dir}; samtools faidx {input.genome} && mv {params.intermediate_file} {output.genome_fai}) \
+#         &> {log}"""
+
+
+# current_rule = "get_genome_segmentations"
+
+# rule get_genome_segmentations:
+#     """
+#         Create .bed file from the input gtf in the GENCODE format. 
+#         The output contains disjoint segments covering all the genome, including intergenic regions.
+#         The created files will be further used for gene coverage and gene expression analysis.
+#     """
+#     input:
+#         gtf=lambda wildcards: samples.loc[samples["organism"] == wildcards.organism]["gtf_file"].iloc[0],
+#         genome_fai=os.path.join(
+#                 config["output_dir"], "genome_indices", "{organism}", "genome.fai"
+#             ),
+#         script=os.path.join(workflow.basedir, "scripts", "get_genome_segmentations.py"),
+#     output:
+#         exon_intron_genome_segmentation=os.path.join(
+#                 config["output_dir"], "transcriptome", "{organism}", "exon_intron_genome_segmentation.bed"
+#             ),
+#         first_middle_last_genome_segmentation=os.path.join(
+#                 config["output_dir"], "transcriptome", "{organism}", "first_middle_last_genome_segmentation.bed"
+#             ),
+#     params:
+#         cluster_log_path=config["cluster_log_dir"],
+#         temp_dir=config["temp_dir"],
+#         additional_params=parse_rule_config(
+#             rule_config,
+#             current_rule=current_rule,
+#             immutable=("--gtf"),
+#         )        
+#     conda:
+#         os.path.join(workflow.basedir, "envs", "bedtools.yaml")
+#     resources:
+#         mem_mb=lambda wildcards, attempt: 10000 * attempt,
+#     benchmark:
+#         os.path.join(config["benchmark_dir"], f"{current_rule}_{{organism}}.benchmark")
+#     log:
+#         stderr=os.path.join(config["log_dir"], f"{current_rule}_{{organism}}.log"),
+#         stdout=os.path.join(config["log_dir"], f"{current_rule}_{{organism}}.log"),
+#     shell:
+#         "(python {input.script} \
+#         --input_gtf {input.gtf} \
+#         --input_genome_fai {input.genome_fai} \
+#         --output_exon_intron_gs {output.exon_intron_genome_segmentation} \
+#         --output_first_middle_last_gs {output.first_middle_last_genome_segmentation} \
+#         --temp_dir {params.temp_dir} \
+#         {params.additional_params}) \
+#         1> {log.stdout} 2> {log.stderr}"
+
+
+# rule GN_bam_to_bigwig:
+#     '''
+#         Bam to bigwig format
+#     '''
+#     input:
+#         bam = os.path.join(
+#             config["output_dir"],
+#             "{sample}",
+#             "{sample}.dedup.sorted.indexed.bam"),
+#         bai = os.path.join(
+#             config["output_dir"],
+#             "{sample}",
+#             "{sample}.dedup.sorted.indexed.bam.bai")
+
+#     output:
+#         bigwig = os.path.join(
+#             config["output_dir"],
+#             "{sample}",
+#             "{sample}.dedup.bw")
+
+#     singularity:
+#         "docker://quay.io/biocontainers/deeptools:3.5.1--py_0"
+
+#     threads: 8
+
+#     log:
+#         os.path.join(
+#             config["local_log"],
+#             "{sample}",
+#             "bam_to_bigwig__{sample}.log")
+
+#     shell:
+#         "(bamCoverage \
+#         --normalizeUsing 'CPM' \
+#         -b {input.bam} \
+#         -o {output.bigwig};) &> {log}"
+
+
+# rule peak_calling:
+#     '''
+#         Peak calling 
+#     '''
+#     input:
+#         bam = os.path.join(
+#             config["output_dir"],
+#             "{sample}",
+#             "{sample}.dedup.sorted.indexed.bam"),
+#         bai =  os.path.join(
+#             config["output_dir"],
+#             "{sample}",
+#             "{sample}.dedup.sorted.indexed.bam.bai")
+#     output:
+#         peaks = os.path.join(
+#             config["output_dir"],
+#             "{sample}",
+#             "pred.bed"),
+
+#     singularity:
+#         "docker://brianyee/clipper:6594e71"
+
+#     threads: 15
+
+#     log:
+#         os.path.join(
+#             config["local_log"],
+#             "{sample}",
+#             "peak_calling.log")
+
+#     shell:
+#         "(clipper \
+#         --bam {input.bam} \
+#         --processors {threads} \
+#         --outfile {output.peaks} \
+#         --species 'mm10' ; ) &> {log}"
+
+
+
+# onsuccess:
+#     print("\nOOO---  Workflow finished, no error  ---OOO")
+# onerror:
+#     print("\nXXX---  Ups, something went wrong.   ---XXX")
