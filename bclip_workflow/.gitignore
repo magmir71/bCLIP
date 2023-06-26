@@ -2,6 +2,8 @@
 !.gitignore
 !README.md
 !Snakefile
+!scripts
+!scripts/*
 !install
 !install/*
 !workflow
