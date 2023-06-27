@@ -3,7 +3,6 @@
 # -----------------------------------------------------------------------------
 # Author : Aleksei Mironov
 # Company: Mihaela Zavolan, Biozentrum, Basel
-# This script is part of the Zavolan lab ZARP pipeline.
 # -----------------------------------------------------------------------------
 
 import sys

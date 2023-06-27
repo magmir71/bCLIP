@@ -12,7 +12,7 @@
 "queue":"6hours",
 "time": "05:59:00",
 "threads":"1",
-"mem":"70G"
+"mem":"150G"
 },
 "extract_umi":
 {
@@ -132,5 +132,26 @@
 "time": "23:00:00",
 "threads":"15",
 "mem":"60G"
+},
+"samtools_index_genome":
+{
+"queue":"6hours",
+"time": "05:59:00",
+"threads":"1",
+"mem":"30G"
+},
+"get_genome_segmentations":
+{
+"queue":"6hours",
+"time": "05:59:00",
+"threads":"1",
+"mem":"40G"
+},
+"bamTobed":
+{
+"queue":"6hours",
+"time": "05:59:00",
+"threads":"1",
+"mem":"70G"
 }
 }

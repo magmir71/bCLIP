@@ -31,6 +31,13 @@ def get_demultiplexed_sample_paths(wildcards):
 
 rule finish:
     input:
+        moved_reads = expand(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "fastq",
+            "{sample}.fastq.gz"),
+        sample = list(samples.index.values)),
         STAR_index_symb_link = expand(os.path.join(
             config["output_dir"],
             "samples",
@@ -77,6 +84,29 @@ rule finish:
             "map_genome",
             "{sample}.dedup.sorted.indexed.bam"),
         sample = list(samples.index.values)),
+        exon_intron_genome_segmentation=expand(os.path.join(
+                config["output_dir"], "transcriptome", "{organism}", "exon_intron_genome_segmentation.bed"
+            ),
+        organism = list(samples['organism'].unique())),
+        first_middle_last_genome_segmentation=expand(os.path.join(
+                config["output_dir"], "transcriptome", "{organism}", "first_middle_last_genome_segmentation.bed"
+            ),
+        organism = list(samples['organism'].unique())),
+        bed=expand(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.dedup.sorted.indexed.bed"),
+        sample = list(samples.index.values)),
+        grouped_bed=expand(os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.dedup.sorted.indexed.grouped.bed",
+        ),
+        sample = list(samples.index.values)),
 
 current_rule = "remove_duplicated_sequences"
         
@@ -96,7 +126,6 @@ rule remove_duplicated_sequences:
     params:
         output_dir = os.path.join(config["output_dir"],"deduplicated"),
         kmer = lambda wildcards: samples.loc[samples["lane_name"] == wildcards.lane, "kmer"].iloc[0],
-        deduplication_summary = lambda wildcards: os.path.join(config["output_dir"],"deduplicated",wildcards.lane+".deduplication_summary.txt"),
     singularity:
         "docker://pegi3s/seqkit"
     threads: 1
@@ -107,7 +136,7 @@ rule remove_duplicated_sequences:
     shell:
         """(mkdir -p {params.output_dir}; \
         if [[ "{params.kmer}" =~ [^Xx[:space:]] ]]; then \
-        seqkit rmdup -s -P {input.reads} -o {output.reads} -D {params.deduplication_summary}; else \
+        seqkit rmdup -s -P {input.reads} -o {output.reads}; else \
         ln -f -s {input.reads} {output.reads}; fi) &> {log}"""               
 
 current_rule = "extract_umi"
@@ -719,7 +748,7 @@ rule GN_umi_collapse:
         dedup \
         -I {input.bam} \
         -S {output.bam}; else \
-        ln -f -s {input.bam} {output.bam}) &> {log}"""
+        ln -f -s {input.bam} {output.bam}; fi) &> {log}"""
         
 current_rule = "GN_index_dedup"
         
@@ -777,79 +806,221 @@ rule GN_index_dedup:
 ### rules about quantification of read counts 
 ###
 
-# current_rule = "samtools_index_genome"
+current_rule = "samtools_index_genome"
 
-# rule samtools_index_genome:
+rule samtools_index_genome:
+    """
+        Create .fai file from the input genome file.
+    """
+    input:
+        genome=lambda wildcards: samples.loc[samples["organism"] == wildcards.organism]["genome_file"].iloc[0],
+    output:
+        genome_fai=os.path.join(
+                config["output_dir"], "genome_indices", "{organism}", "genome.fai"
+            ),
+    params:
+        output_dir=lambda wildcards, output: os.path.dirname(output.genome_fai),
+        intermediate_file=lambda wildcards: samples.loc[samples["organism"] == wildcards.organism]["genome_file"].iloc[0]+'.fai',
+    singularity:
+        "docker://quay.io/biocontainers/samtools:1.9--h10a08f8_12"
+    threads: 1
+    log:
+        os.path.join(config["local_log"],"samtools_index_genome__{organism}.log"),
+    shell:
+        """(mkdir -p {params.output_dir}; samtools faidx {input.genome} && mv {params.intermediate_file} {output.genome_fai}) \
+        &> {log}"""
+
+        
+current_rule = "get_genome_segmentations"
+
+rule get_genome_segmentations:
+    """
+        Create .bed file from the input gtf in the GENCODE format. 
+        The output contains disjoint segments covering all the genome, including intergenic regions.
+        The created files will be further used for gene coverage and gene expression analysis.
+    """
+    input:
+        gtf=lambda wildcards: samples.loc[samples["organism"] == wildcards.organism]["gtf_file"].iloc[0],
+        genome_fai=os.path.join(
+                config["output_dir"], "genome_indices", "{organism}", "genome.fai"
+            ),
+        script=os.path.join(workflow.basedir, "scripts", "get_genome_segmentations.py"),
+    output:
+        exon_intron_genome_segmentation=os.path.join(
+                config["output_dir"], "transcriptome", "{organism}", "exon_intron_genome_segmentation.bed"
+            ),
+        first_middle_last_genome_segmentation=os.path.join(
+                config["output_dir"], "transcriptome", "{organism}", "first_middle_last_genome_segmentation.bed"
+            ),
+    params:
+        temp_dir=os.path.join(config["output_dir"], "transcriptome", "{organism}", "temp"),      
+    singularity:
+        "docker://continuumio/miniconda3:latest"
+    conda:
+        "envs/pandas_bedtools.yaml"
+    threads: 1
+    log:
+        os.path.join(config["local_log"],"get_genome_segmentations__{organism}.log"),
+    shell:
+        """(mkdir -p {params.temp_dir}; python {input.script} \
+        --input_gtf {input.gtf} \
+        --input_genome_fai {input.genome_fai} \
+        --output_exon_intron_gs {output.exon_intron_genome_segmentation} \
+        --output_first_middle_last_gs {output.first_middle_last_genome_segmentation} \
+        --temp_dir {params.temp_dir} \
+        --transcript_ends_length 1000) \
+        &> {log}"""
+
+current_rule = "bamTobed"
+
+rule bamTobed:
+    """
+        Get a bed file from a bam file
+    """
+    input:
+        bam = os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.dedup.sorted.indexed.bam"),
+    output:
+        bed=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.dedup.sorted.indexed.bed",
+        ),
+    singularity:
+        "docker://pegi3s/bedtools:latest"
+    threads: 1
+    log:
+        os.path.join(config["local_log"],"bamTobed__{sample}.log"),
+    shell:
+        """(bedtools bamtobed -split -i {input.bam} > {output.bed}) \
+        &> {log}"""
+
+current_rule = "groupBamToBedFile"
+
+rule groupBamToBedFile:
+    """
+        Grouping bed file with reads, weigthning multimappers and duplicated reads
+    """
+    input:
+        bed=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.dedup.sorted.indexed.bed",
+        ),
+        script=os.path.join(workflow.basedir, "scripts", "group_BamToBed_file.py"),
+    output:
+        grouped_bed=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "map_genome",
+            "{sample}.dedup.sorted.indexed.grouped.bed",
+        ),
+        duplicates_summary=os.path.join(
+            config["output_dir"],
+            "samples",
+            "{sample}",
+            "segment_counts",
+            "{sample}.duplicates_summary.tsv",
+        ),        
+    singularity:
+        "docker://continuumio/miniconda3:latest"
+    conda:
+        "envs/pandas.yaml"
+    threads: 1
+    log:
+        os.path.join(config["local_log"],"groupBamToBedFile__{sample}.log"),
+    shell:
+        """(python {input.script} \
+        --input_bed {input.bed} \
+        --grouped_bed {output.grouped_bed} \
+        --duplicates_summary {output.duplicates_summary}) \
+        &> {log}"""
+
+# current_rule = "map_to_exon_intron_segmentation"
+
+# rule map_to_exon_intron_segmentation:
 #     """
-#         Create .fai file from the input genome file.
+#         Map bamTobed file to genomic segmentation
 #     """
 #     input:
-#         genome=lambda wildcards: samples.loc[samples["organism"] == wildcards.organism]["genome_file"].iloc[0],
+#         grouped_bed=os.path.join(
+#             config["output_dir"],
+#             "samples",
+#             "{sample}",
+#             "map_genome",
+#             "{sample}.dedup.sorted.indexed.grouped.bed",
+#         ),
+#         genome_segmentation=lambda wildcards: os.path.join(
+#             config["output_dir"],
+#             "transcriptome",
+#             samples.loc[wildcards.sample]["organism"],
+#             "exon_intron_genome_segmentation.bed",
+#         ),
+#         script=os.path.join(workflow.basedir, "scripts", "map_to_genome_segmentation.py"),
 #     output:
-#         genome_fai=os.path.join(
-#                 config["output_dir"], "genome_indices", "{organism}", "genome.fai"
-#             ),
+#         wd_counts=os.path.join(
+#             config["output_dir"],
+#             "samples",
+#             "{sample}",
+#             "segment_counts",
+#             "exon_intron",
+#             "{sample}.wd_counts.tsv",
+#         ),
+#         wd_coverage=os.path.join(
+#             config["output_dir"],
+#             "samples",
+#             "{sample}",
+#             "segment_counts",
+#             "exon_intron",
+#             "{sample}.wd_coverage.bed",
+#         ),
 #     params:
-#         output_dir=lambda wildcards, output: os.path.dirname(output.genome_fai),
-#         intermediate_file=lambda wildcards: samples.loc[samples["organism"] == wildcards.organism]["genome_file"].iloc[0]+'.fai',
-#     singularity:
-#         "docker://quay.io/biocontainers/samtools:1.9--h10a08f8_12"
-#     log:
-#         os.path.join(config["local_log"],"samtools_index_genome__{organism}.log"),
-#     shell:
-#         """(mkdir -p {params.output_dir}; samtools faidx {input.genome} && mv {params.intermediate_file} {output.genome_fai}) \
-#         &> {log}"""
-
-
-# current_rule = "get_genome_segmentations"
-
-# rule get_genome_segmentations:
-#     """
-#         Create .bed file from the input gtf in the GENCODE format. 
-#         The output contains disjoint segments covering all the genome, including intergenic regions.
-#         The created files will be further used for gene coverage and gene expression analysis.
-#     """
-#     input:
-#         gtf=lambda wildcards: samples.loc[samples["organism"] == wildcards.organism]["gtf_file"].iloc[0],
-#         genome_fai=os.path.join(
-#                 config["output_dir"], "genome_indices", "{organism}", "genome.fai"
-#             ),
-#         script=os.path.join(workflow.basedir, "scripts", "get_genome_segmentations.py"),
-#     output:
-#         exon_intron_genome_segmentation=os.path.join(
-#                 config["output_dir"], "transcriptome", "{organism}", "exon_intron_genome_segmentation.bed"
-#             ),
-#         first_middle_last_genome_segmentation=os.path.join(
-#                 config["output_dir"], "transcriptome", "{organism}", "first_middle_last_genome_segmentation.bed"
-#             ),
-#     params:
-#         cluster_log_path=config["cluster_log_dir"],
-#         temp_dir=config["temp_dir"],
-#         additional_params=parse_rule_config(
-#             rule_config,
-#             current_rule=current_rule,
-#             immutable=("--gtf"),
-#         )        
+#         directionality=lambda wildcards: samples.loc[wildcards.sample]["directionality"]
 #     conda:
 #         os.path.join(workflow.basedir, "envs", "bedtools.yaml")
+#     threads: 1
 #     resources:
-#         mem_mb=lambda wildcards, attempt: 10000 * attempt,
+#         mem_mb=lambda wildcards, input, attempt: max(3000,20*(input.grouped_bed.size+input.genome_segmentation.size)/1000000) * attempt,
 #     benchmark:
-#         os.path.join(config["benchmark_dir"], f"{current_rule}_{{organism}}.benchmark")
+#         os.path.join(
+#             config["benchmark_dir"],
+#             "samples",
+#             "{sample}",
+#             f"{current_rule}.benchmark",
+#         )
 #     log:
-#         stderr=os.path.join(config["log_dir"], f"{current_rule}_{{organism}}.log"),
-#         stdout=os.path.join(config["log_dir"], f"{current_rule}_{{organism}}.log"),
+#         stderr=os.path.join(
+#             config["log_dir"],
+#             "samples",
+#             "{sample}",
+#             f"{current_rule}.stderr.log",
+#         ),
+#         stdout=os.path.join(
+#             config["log_dir"],
+#             "samples",
+#             "{sample}",
+#             f"{current_rule}.stdout.log",
+#         ),
 #     shell:
 #         "(python {input.script} \
-#         --input_gtf {input.gtf} \
-#         --input_genome_fai {input.genome_fai} \
-#         --output_exon_intron_gs {output.exon_intron_genome_segmentation} \
-#         --output_first_middle_last_gs {output.first_middle_last_genome_segmentation} \
-#         --temp_dir {params.temp_dir} \
-#         {params.additional_params}) \
-#         1> {log.stdout} 2> {log.stderr}"
+#         --grouped_bed {input.grouped_bed} \
+#         --genome_segmentation {input.genome_segmentation} \
+#         --wd_counts {output.wd_counts} \
+#         --wd_coverage {output.wd_coverage} \
+#         --directionality {params.directionality}) \
+#         1> {log.stdout} 2> {log.stderr}"        
+        
 
-
+        
 # rule GN_bam_to_bigwig:
 #     '''
 #         Bam to bigwig format
