@@ -63,9 +63,15 @@ def main():
     # create output directory if not exists
     outdir = '/'.join((options.grouped_bed_file_path.split('/')[:-1]))+'/'
     out = subprocess.check_output('mkdir -p '+outdir, shell=True)
-    
-    bed_file[[0,1,2,'name','w',5,'d','wd','d_cat']].to_csv(options.grouped_bed_file_path, sep=str('\t'),header=False,index=None)
 
+    output_dir = os.path.dirname(options.grouped_bed_file_path)
+    temporary_file = output_dir+'/temporary_nonsorted.bed'
+    
+    bed_file[[0,1,2,'name','w',5,'d','wd','d_cat']].to_csv(temporary_file, sep=str('\t'),header=False,index=None)
+    
+    command = 'bedtools sort -i '+temporary_file+' > '+options.grouped_bed_file_path
+    out = subprocess.check_output(command, shell=True)
+    
     bed_file['t'] = 1
     gr = bed_file.groupby('d_cat').agg({'t':sum,'w':np.median}).reset_index()
     gr = pd.merge(gr,bed_file.loc[bed_file['w']==1].groupby('d_cat').agg({'wd':sum}).reset_index().rename(columns={'wd':'wd_um'}),how='left',on='d_cat')

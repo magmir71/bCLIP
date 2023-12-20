@@ -45,6 +45,11 @@ def main():
                         help="Library directionality (first read - reverse (SR, -S) or first read - forward (SF, -s))",
                         required=True,
                         metavar="FILE")
+    parser.add_argument("--temp_dir",
+                        dest="temp_dir",
+                        help="path where to put temporary files",
+                        required=True,
+                        metavar="FILE")
     try:
         options = parser.parse_args()
     except(Exception):
@@ -59,16 +64,28 @@ def main():
     wd_counts_output_file = options.wd_counts_file_path
     wd_coverage_output_file = options.wd_coverage_file_path
     s_param = '-'+options.directionality
+    prefix = options.temp_dir+'/'
     
     output_dir = '/'.join((wd_counts_output_file.split('/')[:-1]))+'/'
-    prefix = output_dir+'temp'
+
     # create output directory if they don't exist
     out = subprocess.check_output('mkdir -p '+output_dir, shell=True)
     out = subprocess.check_output('mkdir -p '+'/'.join((wd_coverage_output_file.split('/')[:-1]))+'/', shell=True)
+
+    # check that bed file is not empty, otherwise create empty output files and exit
+    if not (os.path.isfile(options.grouped_bed_file_path) and (os.stat(options.grouped_bed_file_path).st_size > 0)):
+        out = subprocess.check_output('touch '+wd_counts_output_file, shell=True)
+        out = subprocess.check_output('touch '+wd_coverage_output_file, shell=True)
+        sys.exit(0)
+
+    genome_segmentation = pd.read_csv(genome_segmentation_file,delimiter="\t",index_col=None,header=None)
+    genome_segmentation['actual_value_name'] = genome_segmentation[3]
+    genome_segmentation[3] = list(genome_segmentation.index)
+    genome_segmentation.drop('actual_value_name',1).to_csv(prefix+'used_genome_segmentation.bed', sep=str('\t'),header=False,index=None) # with counts of duplicates
     
     bed_file = pd.read_csv(options.grouped_bed_file_path,delimiter="\t",index_col=None,header=None)
     bed_file.columns = [0,1,2,'name','w',5,'d','wd','d_cat']
-
+    
     d_cats = list(bed_file['d_cat'].unique())
     d_cats.sort()
 
@@ -83,12 +100,16 @@ def main():
         for dupl_category in d_cats:
             d_cur_bed_file = cur_bed_file.loc[cur_bed_file['d_cat']==dupl_category].reset_index(drop=True)
             if len(d_cur_bed_file)>0:
+                non_sorted_file_name_in = prefix+'.wd.'+mm_mode+'.'+str(dupl_category)+'.nonsorted.bed'
                 file_name_in = prefix+'.wd.'+mm_mode+'.'+str(dupl_category)+'.bed'
-                d_cur_bed_file[[0,1,2,'name','wd',5]].to_csv(file_name_in, sep=str('\t'),header=False,index=None) # with counts of duplicates
+                d_cur_bed_file[[0,1,2,'name','wd',5]].to_csv(non_sorted_file_name_in, sep=str('\t'),header=False,index=None) # with counts of duplicates
+                command = 'bedtools sort -i '+non_sorted_file_name_in+' > '+file_name_in
+                out = subprocess.check_output(command, shell=True)
+                to_rm.append(non_sorted_file_name_in)
                 to_rm.append(file_name_in)
                 file_name_out = prefix+'.wd.'+mm_mode+'.'+str(dupl_category)+'.intersected.bed'
                 # account for reads that span multiple features
-                out = subprocess.check_output('bedtools intersect -a '+file_name_in+' -b '+genome_segmentation_file+' -c '+s_param+' > '+file_name_out, shell=True)
+                out = subprocess.check_output('bedtools intersect -sorted -a '+file_name_in+' -b '+prefix+'used_genome_segmentation.bed'+' -c '+s_param+' > '+file_name_out, shell=True)
                 if out.decode()=='': # if successful
                     to_rm.append(file_name_out)
                     d_cur_bed_file = pd.read_csv(file_name_out,delimiter="\t",index_col=None,header=None)
@@ -107,7 +128,7 @@ def main():
                         file_name_in = file_name_out
                         ### wd sum
                         wd_file_name_out = prefix+'.wd.'+mm_mode+'.'+str(dupl_category)+'.wd_sum.bed'
-                        out = subprocess.check_output('bedtools map -a '+genome_segmentation_file+' -b '+file_name_in+' -null 0 '+s_param+' -c 5 -o sum > '+wd_file_name_out, shell=True)
+                        out = subprocess.check_output('bedtools map -a '+prefix+'used_genome_segmentation.bed'+' -b '+file_name_in+' -null 0 '+s_param+' -c 5 -o sum > '+wd_file_name_out, shell=True)
                         to_rm.append(wd_file_name_out)
                         ### get coverage summary
 
@@ -121,8 +142,13 @@ def main():
                         coverage_intersect_file_name_out = prefix+'.wd.'+mm_mode+'.'+str(dupl_category)+'.coverage_intersect.bed'
                         if len(d_cur_bed_file.loc[d_cur_bed_file[5]=='+'])>0:
 
+                            # bedops requires files to be sorted with sort-bed
+                            command = 'sort-bed '+file_name_out_positive+' > '+file_name_out_positive+'.sorted && rm '+file_name_out_positive+' && mv '+file_name_out_positive+'.sorted '+file_name_out_positive
+                            out = subprocess.check_output(command, shell=True)
+                            
                             command = 'bedops --partition '+file_name_out_positive+' > '+file_name_out_positive_partitions
                             out = subprocess.check_output(command, shell=True)
+                            
                             to_rm.append(file_name_out_positive_partitions)
                             command = 'bedtools map -a '+file_name_out_positive_partitions+' -b '+file_name_out_positive+' -null 0 -c 5 -o sum > '+file_name_out_positive_coverage
                             out = subprocess.check_output(command, shell=True)
@@ -135,10 +161,15 @@ def main():
                             to_rm.append(file_name_out_positive_coverage)
 
                         if len(d_cur_bed_file.loc[d_cur_bed_file[5]=='-'])>0:
+
+                            # bedops requires files to be sorted with sort-bed
+                            command = 'sort-bed '+file_name_out_negative+' > '+file_name_out_negative+'.sorted && rm '+file_name_out_negative+' && mv '+file_name_out_negative+'.sorted '+file_name_out_negative
+                            out = subprocess.check_output(command, shell=True)                            
+                            
                             command = 'bedops --partition '+file_name_out_negative+' > '+file_name_out_negative_partitions
                             out = subprocess.check_output(command, shell=True)
+                            
                             to_rm.append(file_name_out_negative_partitions)
-
                             command = 'bedtools map -a '+file_name_out_negative_partitions+' -b '+file_name_out_negative+' -null 0 -c 5 -o sum > '+file_name_out_negative_coverage
                             out = subprocess.check_output(command, shell=True)
                             to_rm.append(file_name_out_negative_coverage)
@@ -150,10 +181,10 @@ def main():
                             out = subprocess.check_output(command, shell=True)
                             to_rm.append(file_name_out_negative_coverage)
 
-                        command = 'cat '+file_name_out_negative_coverage+' '+file_name_out_positive_coverage+' > '+file_name_out_coverage
+                        command = 'cat '+file_name_out_negative_coverage+' '+file_name_out_positive_coverage+' | bedtools sort > '+file_name_out_coverage
                         out = subprocess.check_output(command, shell=True)
                         to_rm.append(file_name_out_coverage)
-                        command = 'bedtools intersect -a '+genome_segmentation_file+' -b '+file_name_out_coverage+' -wo '+s_param+' | cut -f1-4,6,10,13 > '+coverage_intersect_file_name_out
+                        command = 'bedtools intersect -sorted -a '+prefix+'used_genome_segmentation.bed'+' -b '+file_name_out_coverage+' -wo '+s_param+' | cut -f1-4,6,10,13 > '+coverage_intersect_file_name_out
                         out = subprocess.check_output(command, shell=True)
                         to_rm.append(coverage_intersect_file_name_out)
                         coverage_intersect = pd.read_csv(coverage_intersect_file_name_out,delimiter="\t",index_col=None,header=None)
@@ -162,6 +193,10 @@ def main():
                         coverage_intersect['score'] = dupl_category
                         coverage_intersect['r'] = coverage_intersect['r']/1000
                         coverage_intersect['mm_mode'] = ('um' if mm_mode=='uniquely_mapped' else 'mm')
+
+                        coverage_intersect = pd.merge(coverage_intersect,genome_segmentation[[3,'actual_value_name']],how='left',on=[3])
+                        coverage_intersect[3] = coverage_intersect['actual_value_name']
+                        
                         coverage_intersect[[0,1,2,3,'score',4,'r','overlap','mm_mode']].to_csv(coverage_intersect_file_name_out, sep=str('\t'),header=False,index=None)
                         a.append([mm_mode+';'+str(dupl_category),wd_file_name_out,coverage_intersect_file_name_out])
                     else:
@@ -170,7 +205,7 @@ def main():
                 a.append([mm_mode+';'+str(dupl_category),None,None])
 
     # merging wd counts and coverage
-    res = pd.read_csv(genome_segmentation_file,delimiter="\t",index_col=None,header=None)
+    res = pd.read_csv(prefix+'used_genome_segmentation.bed',delimiter="\t",index_col=None,header=None)
     res = res[[0,1,2,5,3]]
     concat_string = ''
     for elem in a:
@@ -187,9 +222,12 @@ def main():
     cols = list(res.columns)
     cols = ['chr','start','end','strand','segment_name']+cols[5:]
     res.columns = cols
-    res.drop_duplicates(['chr','start','end',
-                         'strand','segment_name']).sort_values(['chr','start','end',
-                                                                'strand','segment_name']).to_csv(wd_counts_output_file, sep=str('\t'),header=True,index=None)
+    # res = res.loc[res[cols[5:]].sum(1)>0].reset_index(drop=True) # remove the lines with all zeros
+    res.drop_duplicates(['chr','start','end','strand','segment_name']).sort_values(['chr','start','end','strand','segment_name']).reset_index(drop=True)
+    res = pd.merge(res,genome_segmentation[[3,'actual_value_name']].rename(columns={3:'segment_name'}),how='left',on='segment_name')
+    res['segment_name'] = res['actual_value_name']
+    res = res.drop('actual_value_name',1)
+    res.to_csv(wd_counts_output_file, sep=str('\t'),header=True,index=None)
 
     # concatenate all coverage files into the final output file
     command = 'cat'+concat_string+' > '+wd_coverage_output_file
