@@ -75,7 +75,8 @@ def main():
     for strand in ['+','-']:
         tmp = transcripts.loc[transcripts['strand']==strand].sort_values(['chr','TSS'],ascending=[True,(True if strand=='+' else False)]).reset_index(drop=True)
         coef = (1 if strand=='+' else -1)
-        # prioritize the most distal TSS if there are alternatives 
+        # prioritize the most distal TSS if there are alternatives
+        tmp = tmp.drop_duplicates('gene_name').reset_index(drop=True)
         a = []
         chr_prev,TSS_prev = '',-1
         for v in tmp[['chr','TSS']].values:

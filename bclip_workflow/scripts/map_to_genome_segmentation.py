@@ -50,6 +50,11 @@ def main():
                         help="path where to put temporary files",
                         required=True,
                         metavar="FILE")
+    parser.add_argument("--mapping_mode",
+                        dest="mapping_mode",
+                        help="full mapping or 3'end or 5'end of the read, with respect to its orientation. Values can be full, 3end, 5end",
+                        default = "full",
+                        metavar="FILE")
     try:
         options = parser.parse_args()
     except(Exception):
@@ -67,7 +72,8 @@ def main():
     prefix = options.temp_dir+'/'
     
     output_dir = '/'.join((wd_counts_output_file.split('/')[:-1]))+'/'
-
+    mapping_mode = options.mapping_mode
+    
     # create output directory if they don't exist
     out = subprocess.check_output('mkdir -p '+output_dir, shell=True)
     out = subprocess.check_output('mkdir -p '+'/'.join((wd_coverage_output_file.split('/')[:-1]))+'/', shell=True)
@@ -81,11 +87,31 @@ def main():
     genome_segmentation = pd.read_csv(genome_segmentation_file,delimiter="\t",index_col=None,header=None)
     genome_segmentation['actual_value_name'] = genome_segmentation[3]
     genome_segmentation[3] = list(genome_segmentation.index)
-    genome_segmentation.drop('actual_value_name',1).to_csv(prefix+'used_genome_segmentation.bed', sep=str('\t'),header=False,index=None) # with counts of duplicates
+    genome_segmentation.drop('actual_value_name',1).to_csv(prefix+'used_genome_segmentation.nonsorted.bed', sep=str('\t'),header=False,index=None) # with counts of duplicates
+    out = subprocess.check_output('bedtools sort -i '+prefix+'used_genome_segmentation.nonsorted.bed > '+prefix+'used_genome_segmentation.bed', shell=True)
     
     bed_file = pd.read_csv(options.grouped_bed_file_path,delimiter="\t",index_col=None,header=None)
     bed_file.columns = [0,1,2,'name','w',5,'d','wd','d_cat']
-    
+
+    bed_file['temp_prev_end'] = bed_file[2].astype('int')-1
+    bed_file['temp_post_start'] = bed_file[1].astype('int')+1
+    if mapping_mode=="3end":
+        tmp_plus = bed_file.loc[bed_file[5]=='+']
+        tmp_plus[1] = tmp_plus['temp_prev_end']
+        tmp_plus = tmp_plus.drop(['temp_prev_end','temp_post_start'],1)
+        tmp_minus = bed_file.loc[bed_file[5]=='-']
+        tmp_minus[2] = tmp_minus['temp_post_start']
+        tmp_minus = tmp_minus.drop(['temp_prev_end','temp_post_start'],1)
+        bed_file = pd.concat([tmp_plus,tmp_minus]).reset_index(drop=True)
+    if mapping_mode=="5end":
+        tmp_plus = bed_file.loc[bed_file[5]=='+']
+        tmp_plus[2] = tmp_plus['temp_post_start']
+        tmp_plus = tmp_plus.drop(['temp_prev_end','temp_post_start'],1)
+        tmp_minus = bed_file.loc[bed_file[5]=='-']
+        tmp_minus[1] = tmp_minus['temp_prev_end']
+        tmp_minus = tmp_minus.drop(['temp_prev_end','temp_post_start'],1)
+        bed_file = pd.concat([tmp_plus,tmp_minus]).reset_index(drop=True)
+        
     d_cats = list(bed_file['d_cat'].unique())
     d_cats.sort()
 

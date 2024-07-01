@@ -54,11 +54,6 @@ def main():
                         help="path for the directory with chr-separated sel TSSs",
                         required=True,
                         metavar="FILE")
-    parser.add_argument("--directionality",
-                        dest="directionality",
-                        help="Library directionality (first read - reverse (SR, -S) or first read - forward (SF, -s))",
-                        required=True,
-                        metavar="FILE")
     parser.add_argument("--metaplot_dir",
                         dest="metaplot_dir",
                         help="path for the output directory",
@@ -88,7 +83,6 @@ def main():
     metaplot_dir = options.metaplot_dir+'/'
 
     selected_TSSs_over_chrs_dir = options.selected_TSSs_over_chrs_dir+'/'
-    s_param = '-'+options.directionality
     
     chr_list = (start_samples.loc[start_samples['name']==sample].iloc[0]['chromosomes'].split(' '))
 
@@ -96,7 +90,7 @@ def main():
     out = subprocess.check_output(command, shell=True)
 
     CC = 1
-    for count_col in ['uniquely_mapped;0','uniquely_mapped;1','multimapped;0','multimapped;1']:
+    for count_col in ['uniquely_mapped;0']:
         bin_counts_over_chrs_list = []
         for chr in chr_list:
             
@@ -132,7 +126,7 @@ def main():
     
             command = 'bedtools sort -i '+nonsorted_temp_file_path+' > '+sorted_temp_file_path
             out = subprocess.check_output(command, shell=True)   
-            command = 'bedtools intersect -sorted -a '+sorted_temp_file_path+' -b '+selected_TSSs_over_chrs_file+' -wa -wb '+s_param+""" | awk \'{print $1"\\t"$2"\\t"$3"\\t"$10"\\t"$5"\\t"$6}\' > """+sel_file_path
+            command = 'bedtools intersect -sorted -a '+sorted_temp_file_path+' -b '+selected_TSSs_over_chrs_file+' -wa -wb -s'+""" | awk \'{print $1"\\t"$2"\\t"$3"\\t"$10"\\t"$5"\\t"$6}\' > """+sel_file_path
             out = subprocess.check_output(command, shell=True)
     
             command = 'rm '+sorted_temp_file_path+' '+nonsorted_temp_file_path
