@@ -15,4 +15,6 @@ Workflows should be run from within the subdirectory "./bclip_workflow".
 
 **3)** The jupyter notebook "QC_plots.ipynb" produces tables and figures for the in-depth quality control analysis of bCLIP/eCLIP data. 
 
-**4)** The jupyter notebook "QC_plots_detailed_mapping.ipynb" produces the figures to analyze the CIGAR and MD features from .bam files (soft-clip positions and locations of single-nucleotide polymorphisms within reads). 
+**4)** The jupyter notebook "QC_plots_detailed_mapping.ipynb" produces the figures to analyze the CIGAR and MD features from .bam files (soft-clip positions and locations of single-nucleotide polymorphisms within reads).
+
+**5)** The jupyter notebook "Analysis_bCLIP.ipynb" contains all the code to generate final figures and tables for the manuscript.
