@@ -10,4 +10,9 @@ Briefly, the computations were done in the following steps:
 **1)** Running jupyter notebook "bCLIP.ipynb".
 It contains the code to download necesary public data, organize the input files into folders, create custom annotation .gtf files (union of GENCODE + RNAcentral), and prepare the configuration for the snakemake workflow.
 
-**2)**  
+**2)** Section "Run main WF" in the notebook "bCLIP.ipynb" creates the bash commands to run the respective snakemake workflows for bCLIP, eCLIP, and ChipSeq data (Snakefile_bCLIP), PRO-seq data (Snakefile_PROseq), RNA-seq and TT-seq data (Snakefile_RNAseq). The workflow files are located in the subfolder "./bclip_workflow".
+Workflows should be run from within the subdirectory "./bclip_workflow".
+
+**3)** The jupyter notebook "QC_plots.ipynb" produces tables and figures for the in-depth quality control analysis of bCLIP/eCLIP data. 
+
+**4)** The jupyter notebook "QC_plots_detailed_mapping.ipynb" produces the figures to analyze the CIGAR and MD features from .bam files (soft-clip positions and locations of single-nucleotide polymorphisms within reads). 
